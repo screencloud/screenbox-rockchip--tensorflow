@@ -47,7 +47,7 @@ void FATAL(const char* format, ...) {
 
 #define CHECK_NN(x)                                   \
   if (x != ANEURALNETWORKS_NO_ERROR) {                \
-    FATAL("Aborting since tflite returned failure."); \
+    FATAL("Aborting since tflite NN returned failure."); \
   }
 
 namespace {
@@ -69,7 +69,7 @@ int32_t GetAndroidSdkVersion() {
   }
   FATAL("No %s prop", sdkProp);
 #endif  // __ANDROID__
-  return 0;
+  return 99;
 }
 
 static const int32_t kAndroidSdkVersion = GetAndroidSdkVersion();
@@ -234,7 +234,10 @@ void AddOpsAndParams(tflite::Interpreter* interpreter,
           next_id++;
         };
 
-    auto add_add_params = [&add_scalar_int32]() { add_scalar_int32(0); };
+    auto add_add_params = [&add_scalar_int32](void* data) { 
+      auto builtin = reinterpret_cast<TfLiteAddParams*>(data);
+      add_scalar_int32(builtin->activation);
+    };
 
     auto add_pooling_params = [&add_scalar_int32](void* data) {
       auto builtin = reinterpret_cast<TfLitePoolParams*>(data);
@@ -339,17 +342,35 @@ void AddOpsAndParams(tflite::Interpreter* interpreter,
       }
     };
 
+    auto add_squeeze_params = [&](void* data) {
+        auto builtin = reinterpret_cast<TfLiteSqueezeParams*>(data);
+        uint32_t num_squeeze_dims = builtin->num_squeeze_dims;
+        ANeuralNetworksOperandType operand_type{
+            ANEURALNETWORKS_TENSOR_INT32,
+            1,
+            reinterpret_cast<uint32_t*>(&num_squeeze_dims),
+            0,
+            0};
+
+        //ANeuralNetworksOperandType operand_type{.type = ANEURALNETWORKS_FLOAT32};
+        CHECK_NN(ANeuralNetworksModel_addOperand(nn_model, &operand_type))
+        CHECK_NN(ANeuralNetworksModel_setOperandValue(
+            nn_model, next_id, builtin->squeeze_dims,
+            sizeof(int) * builtin->num_squeeze_dims));
+        augmented_inputs.push_back(next_id++);
+    };
+
     int nnapi_version = 10;
     ANeuralNetworksOperationType nn_op_type;
 
     switch (builtin) {
       case tflite::BuiltinOperator_ADD:
         nn_op_type = ANEURALNETWORKS_ADD;
-        add_add_params();
+        add_add_params(node.builtin_data);
         break;
       case tflite::BuiltinOperator_MUL:
         nn_op_type = ANEURALNETWORKS_MUL;
-        add_add_params();
+        add_add_params(node.builtin_data);
         break;
       case tflite::BuiltinOperator_AVERAGE_POOL_2D:
         add_pooling_params(node.builtin_data);
@@ -450,6 +471,11 @@ void AddOpsAndParams(tflite::Interpreter* interpreter,
         nnapi_version = 11;  // require NNAPI 1.1
         nn_op_type = ANEURALNETWORKS_SUB;
         break;
+      case tflite::BuiltinOperator_SQUEEZE:
+        nnapi_version = 11;  // require NNAPI 1.1
+        add_squeeze_params(node.builtin_data);
+        nn_op_type = ANEURALNETWORKS_SQUEEZE;
+        break;
       case tflite::BuiltinOperator_CONCAT_EMBEDDINGS:
       case tflite::BuiltinOperator_LSH_PROJECTION:
       case tflite::BuiltinOperator_HASHTABLE_LOOKUP:
@@ -471,7 +497,7 @@ void AddOpsAndParams(tflite::Interpreter* interpreter,
       case tflite::BuiltinOperator_TOPK_V2:
       case tflite::BuiltinOperator_TRANSPOSE:
       case tflite::BuiltinOperator_SPLIT:
-      case tflite::BuiltinOperator_SQUEEZE:
+      //case tflite::BuiltinOperator_SQUEEZE:
       case tflite::BuiltinOperator_STRIDED_SLICE:
       case tflite::BuiltinOperator_EXP:
       case tflite::BuiltinOperator_LOG_SOFTMAX:

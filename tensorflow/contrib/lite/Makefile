@@ -43,6 +43,7 @@ INCLUDES := \
 -I$(MAKEFILE_DIR)/downloads/neon_2_sse \
 -I$(MAKEFILE_DIR)/downloads/farmhash/src \
 -I$(MAKEFILE_DIR)/downloads/flatbuffers/include \
+-I$(MAKEFILE_DIR)/examples/label_image/3rdparty/opencv/include \
 -I$(GENDIR)
 # This is at the end so any globally-installed frameworks like protobuf don't
 # override local versions in the source tree.
@@ -69,11 +70,18 @@ LIB_PATH := $(LIBDIR)$(LIB_NAME)
 
 # A small example program that shows how to link against the library.
 MINIMAL_PATH := $(BINDIR)minimal
+LABEL_IMAGE_PATH :=$(BINDIR)label_image
 
 MINIMAL_SRCS := \
 tensorflow/contrib/lite/examples/minimal/minimal.cc
 MINIMAL_OBJS := $(addprefix $(OBJDIR), \
 $(patsubst %.cc,%.o,$(patsubst %.c,%.o,$(MINIMAL_SRCS))))
+
+LABEL_IMAGE_SRCS := \
+tensorflow/contrib/lite/examples/label_image/label_image.cc \
+tensorflow/contrib/lite/examples/label_image/bitmap_helpers.cc 
+LABEL_IMAGE_OBJS := $(addprefix $(OBJDIR), \
+$(patsubst %.cc,%.o,$(patsubst %.c,%.o,$(LABEL_IMAGE_SRCS))))
 
 # What sources we want to compile, must be kept in sync with the main Bazel
 # build files.
@@ -99,7 +107,8 @@ $(wildcard tensorflow/contrib/lite/*/*test.cc) \
 $(wildcard tensorflow/contrib/lite/*/*/*test.cc) \
 $(wildcard tensorflow/contrib/lite/*/*/*/*test.cc) \
 $(wildcard tensorflow/contrib/lite/kernels/test_util.cc) \
-$(MINIMAL_SRCS)
+$(MINIMAL_SRCS) \
+$(LABEL_IMAGE_SRCS)
 # Filter out all the excluded files.
 TF_LITE_CC_SRCS := $(filter-out $(CORE_CC_EXCLUDE_SRCS), $(CORE_CC_ALL_SRCS))
 # File names of the intermediate files target compilation generates.
@@ -118,7 +127,7 @@ $(OBJDIR)%.o: %.c
 	$(CC) $(CCFLAGS) $(INCLUDES) -c $< -o $@
 
 # The target that's compiled if there's no command-line arguments.
-all: $(LIB_PATH)  $(MINIMAL_PATH)
+all: $(LIB_PATH)  $(MINIMAL_PATH) $(LABEL_IMAGE_PATH)
 
 # Gathers together all the objects we've compiled into a single '.a' archive.
 $(LIB_PATH): $(LIB_OBJS)
@@ -130,6 +139,13 @@ $(MINIMAL_PATH): $(MINIMAL_OBJS) $(LIB_PATH)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) \
 	-o $(MINIMAL_PATH) $(MINIMAL_OBJS) \
 	$(LIBFLAGS) $(LIB_PATH) $(LDFLAGS) $(LIBS)
+
+$(LABEL_IMAGE_PATH): $(LABEL_IMAGE_OBJS) $(LIB_PATH)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) \
+	-o $(LABEL_IMAGE_PATH) $(LABEL_IMAGE_OBJS) \
+	$(LIBFLAGS) $(LIB_PATH) $(LDFLAGS) $(LIBS) \
+        -L$(MAKEFILE_DIR)/examples/label_image/3rdparty/opencv/lib -lopencv_core -lopencv_highgui -lopencv_imgcodecs -lopencv_imgproc
 
 # Gets rid of all generated files.
 clean:

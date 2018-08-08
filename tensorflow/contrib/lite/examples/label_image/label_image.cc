@@ -40,6 +40,17 @@ limitations under the License.
 #include "tensorflow/contrib/lite/examples/label_image/bitmap_helpers.h"
 #include "tensorflow/contrib/lite/examples/label_image/get_top_n.h"
 
+#define FOR_SSD             0
+
+#if 1==FOR_SSD
+#include "opencv2/core/core.hpp"
+#include "opencv2/imgproc/imgproc.hpp"
+#include "opencv2/highgui/highgui.hpp"
+
+using namespace std;
+using namespace cv;
+#endif
+
 #define LOG(x) std::cerr
 
 namespace tflite {
@@ -86,6 +97,165 @@ void PrintProfilingInfo(const profiling::ProfileEvent* e, uint32_t op_index,
                    static_cast<BuiltinOperator>(registration.builtin_code))
             << "\n";
 }
+
+
+#if 1==FOR_SSD
+
+#define NUM_RESULTS         1917
+#define NUM_CLASSES         91
+
+#define Y_SCALE  10.0f
+#define X_SCALE  10.0f
+#define H_SCALE  5.0f
+#define W_SCALE  5.0f
+
+Scalar colorArray[10] = {
+        Scalar(139,   0,   0, 255),
+        Scalar(139,   0, 139, 255),
+        Scalar(  0,   0, 139, 255),
+        Scalar(  0, 100,   0, 255),
+        Scalar(139, 139,   0, 255),
+        Scalar(209, 206,   0, 255),
+        Scalar(  0, 127, 255, 255),
+        Scalar(139,  61,  72, 255),
+        Scalar(  0, 255,   0, 255),
+        Scalar(255,   0,   0, 255),
+};
+
+float MIN_SCORE = 0.4f;
+
+float NMS_THRESHOLD = 0.45f;
+
+
+int loadLabelName(string locationFilename, string* labels) {
+    ifstream fin(locationFilename);
+    string line;
+    int lineNum = 0;
+    while(getline(fin, line))
+    {
+        labels[lineNum] = line;
+        lineNum++;
+    }
+    return 0;
+}
+
+int loadCoderOptions(string locationFilename, float (*boxPriors)[NUM_RESULTS])
+{
+    const char *d = ", ";
+    ifstream fin(locationFilename);
+    string line;
+    int lineNum = 0;
+    while(getline(fin, line))
+    {
+        char *line_str = const_cast<char *>(line.c_str());
+        char *p;
+        p = strtok(line_str, d);
+        int priorIndex = 0;
+        while (p) {
+            float number = static_cast<float>(atof(p));
+            boxPriors[lineNum][priorIndex++] = number;
+            p=strtok(nullptr, d);
+        }
+        if (priorIndex != NUM_RESULTS) {
+            return -1;
+        }
+        lineNum++;
+    }
+    return 0;
+
+}
+
+float CalculateOverlap(float xmin0, float ymin0, float xmax0, float ymax0, float xmin1, float ymin1, float xmax1, float ymax1) {
+    float w = max(0.f, min(xmax0, xmax1) - max(xmin0, xmin1));
+    float h = max(0.f, min(ymax0, ymax1) - max(ymin0, ymin1));
+    float i = w * h;
+    float u = (xmax0 - xmin0) * (ymax0 - ymin0) + (xmax1 - xmin1) * (ymax1 - ymin1) - i;
+    return u <= 0.f ? 0.f : (i / u);
+}
+
+float expit(float x) {
+    return (float) (1.0 / (1.0 + exp(-x)));
+}
+
+void decodeCenterSizeBoxes(float* predictions, float (*boxPriors)[NUM_RESULTS]) {
+
+    for (int i = 0; i < NUM_RESULTS; ++i) {
+        float ycenter = predictions[i*4+0] / Y_SCALE * boxPriors[2][i] + boxPriors[0][i];
+        float xcenter = predictions[i*4+1] / X_SCALE * boxPriors[3][i] + boxPriors[1][i];
+        float h = (float) exp(predictions[i*4 + 2] / H_SCALE) * boxPriors[2][i];
+        float w = (float) exp(predictions[i*4 + 3] / W_SCALE) * boxPriors[3][i];
+
+        float ymin = ycenter - h / 2.0f;
+        float xmin = xcenter - w / 2.0f;
+        float ymax = ycenter + h / 2.0f;
+        float xmax = xcenter + w / 2.0f;
+
+        predictions[i*4 + 0] = ymin;
+        predictions[i*4 + 1] = xmin;
+        predictions[i*4 + 2] = ymax;
+        predictions[i*4 + 3] = xmax;
+    }
+}
+
+int scaleToInputSize(float * outputClasses, int (*output)[NUM_RESULTS], int numClasses)
+{
+    int validCount = 0;
+    // Scale them back to the input size.
+    for (int i = 0; i < NUM_RESULTS; ++i) {
+        float topClassScore = static_cast<float>(-1000.0);
+        int topClassScoreIndex = -1;
+
+        // Skip the first catch-all class.
+        for (int j = 1; j < numClasses; ++j) {
+            float score = expit(outputClasses[i*numClasses+j]);
+            if (score > topClassScore) {
+                topClassScoreIndex = j;
+                topClassScore = score;
+            }
+        }
+
+        if (topClassScore >= MIN_SCORE) {
+            output[0][validCount] = i;
+            output[1][validCount] = topClassScoreIndex;
+            ++validCount;
+        }
+    }
+
+    return validCount;
+}
+
+int nms(int validCount, float* outputLocations, int (*output)[NUM_RESULTS])
+{
+    for (int i=0; i < validCount; ++i) {
+        if (output[0][i] == -1) {
+            continue;
+        }
+        int n = output[0][i];
+        for (int j=i + 1; j<validCount; ++j) {
+            int m = output[0][j];
+            if (m == -1) {
+                continue;
+            }
+            float xmin0 = outputLocations[n*4 + 1];
+            float ymin0 = outputLocations[n*4 + 0];
+            float xmax0 = outputLocations[n*4 + 3];
+            float ymax0 = outputLocations[n*4 + 2];
+
+            float xmin1 = outputLocations[m*4 + 1];
+            float ymin1 = outputLocations[m*4 + 0];
+            float xmax1 = outputLocations[m*4 + 3];
+            float ymax1 = outputLocations[m*4 + 2];
+
+            float iou = CalculateOverlap(xmin0, ymin0, xmax0, ymax0, xmin1, ymin1, xmax1, ymax1);
+
+            if (iou >= NMS_THRESHOLD) {
+                output[0][j] = -1;
+            }
+        }
+    }
+}
+#endif  // 1==FOR_SSD
+
 
 void RunInference(Settings* s) {
   if (!s->model_name.c_str()) {
@@ -190,6 +360,15 @@ void RunInference(Settings* s) {
 
   struct timeval start_time, stop_time;
   gettimeofday(&start_time, nullptr);
+  if (interpreter->Invoke() != kTfLiteOk) {
+    LOG(FATAL) << "Failed to invoke tflite!\n";
+  }
+  gettimeofday(&stop_time, NULL);
+  LOG(INFO) << "first invoked time: "
+            << (get_us(stop_time) - get_us(start_time))/1000
+           << " ms \n";
+
+  gettimeofday(&start_time, NULL);
   for (int i = 0; i < s->loop_count; i++) {
     if (interpreter->Invoke() != kTfLiteOk) {
       LOG(FATAL) << "Failed to invoke tflite!\n";
@@ -213,6 +392,7 @@ void RunInference(Settings* s) {
     }
   }
 
+#if 1!=FOR_SSD
   const int output_size = 1000;
   const size_t num_results = 5;
   const float threshold = 0.001f;
@@ -247,6 +427,79 @@ void RunInference(Settings* s) {
     const int index = result.second;
     LOG(INFO) << confidence << ": " << index << " " << labels[index] << "\n";
   }
+#else
+  size_t predictionsNum = NUM_RESULTS * 4;
+  size_t outputClassesNum = NUM_RESULTS * NUM_CLASSES;
+
+  float boxPriors[4][NUM_RESULTS];
+  string labels[91];
+
+  float *predictions = new float[predictionsNum];
+  float *outputClasses = new float[outputClassesNum];
+  int output[2][NUM_RESULTS];
+
+  memset(predictions, 0x00, predictionsNum * sizeof(float));
+  memset(outputClasses, 0x00, outputClassesNum * sizeof(float));
+
+  /* load label and boxPriors */
+  loadLabelName("coco_labels_list.txt", labels);
+  loadCoderOptions("box_priors.txt", boxPriors);
+
+  int output0 = interpreter->outputs()[0];
+  if(kTfLiteFloat32 != interpreter->tensor(output0)->type) {
+    LOG(FATAL) << "cannot handle output0 type " << interpreter->tensor(output0)->type << " yet!" << "\n";
+    return;
+  }
+  memcpy(predictions, interpreter->typed_tensor<float>(output0), predictionsNum * sizeof(float));
+
+  int output1 = interpreter->outputs()[1];
+  if(kTfLiteFloat32 != interpreter->tensor(output1)->type) {
+    LOG(FATAL) << "cannot handle output1 type " << interpreter->tensor(output1)->type << " yet!" << "\n";
+    return;
+  }
+  memcpy(outputClasses, interpreter->typed_tensor<float>(output1), outputClassesNum * sizeof(float));
+
+  /* transform */
+  decodeCenterSizeBoxes(predictions, boxPriors);
+
+  int validCount = scaleToInputSize(outputClasses, output, NUM_CLASSES);
+  LOG(INFO) << "validCount: " << validCount << "\n";
+
+  if (validCount > 100) {
+    LOG(FATAL) << "validCount too much !!" << "\n";
+    return;
+  }
+
+  /* detect nest box */
+  nms(validCount, predictions, output);
+
+  Mat rgba = imread(s->input_bmp_name, CV_LOAD_IMAGE_UNCHANGED);
+  cv::resize(rgba, rgba, cv::Size(1200, 1200), (0, 0), (0, 0), cv::INTER_LINEAR);
+
+  /* box valid detect target */
+  for (int i = 0; i < validCount; ++i) {
+    if (output[0][i] == -1) {
+        continue;
+    }
+    int n = output[0][i];
+    int topClassScoreIndex = output[1][i];
+
+    int x1 = static_cast<int>(predictions[n * 4 + 1] * rgba.cols);
+    int y1 = static_cast<int>(predictions[n * 4 + 0] * rgba.rows);
+    int x2 = static_cast<int>(predictions[n * 4 + 3] * rgba.cols);
+    int y2 = static_cast<int>(predictions[n * 4 + 2] * rgba.rows);
+
+    string label = labels[topClassScoreIndex];
+
+    LOG(INFO) << label << "\t@ (" << x1 << ", " << y1 << ") (" << x2 << ", " << y2 << ")" << "\n";
+
+    rectangle(rgba, Point(x1, y1), Point(x2, y2), colorArray[topClassScoreIndex%10], 3);
+    putText(rgba, label, Point(x1, y1 - 12), 1, 2, Scalar(0, 255, 0, 255));
+  }
+
+  imwrite("out.jpg", rgba);
+  LOG(INFO) << "write out.jpg succ!\n";
+#endif
 }
 
 void display_usage() {
